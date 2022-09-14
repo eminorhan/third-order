@@ -26,10 +26,10 @@ def third_order_attention(query, key_0, key_1, value_0, value_1, mask=None, drop
     return output, p_attn
 
 
-class MultiHeadedAttention(nn.Module):
+class ThirdOrderSelfAttention(nn.Module):
     def __init__(self, n_head, n_embd, dropout=0.1):
         "Take in model size and number of heads."
-        super(MultiHeadedAttention, self).__init__()
+        super(ThirdOrderSelfAttention, self).__init__()
 
         # TODO: probably reparametrize in terms of n_head and n_embd // n_head (emb dim per head)
         assert n_embd % n_head == 0
