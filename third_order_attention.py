@@ -1,16 +1,10 @@
 import math
-import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def clones(module, N):
-    "Produce N identical layers."
-    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
-
-
-def attention(query, key_0, key_1, value_0, value_1, mask=None, dropout=None):
+def third_order_attention(query, key_0, key_1, value_0, value_1, mask=None, dropout=None):
     "Compute 'Scaled Dot Product Attention'"
     d_k = query.size(-1)
 
@@ -18,6 +12,7 @@ def attention(query, key_0, key_1, value_0, value_1, mask=None, dropout=None):
     scores = torch.einsum('bhkd,bhld,bhmd->bhklm', query, key_0, key_1) / math.sqrt(d_k)
     if mask is not None:
         scores = scores.masked_fill(mask == 0, -1e9)
+
     p_attn = F.softmax(scores, dim = -1)
     if dropout is not None:
         p_attn = dropout(p_attn)
@@ -32,29 +27,46 @@ def attention(query, key_0, key_1, value_0, value_1, mask=None, dropout=None):
 
 
 class MultiHeadedAttention(nn.Module):
-    def __init__(self, h, d_model, dropout=0.1):
+    def __init__(self, n_head, n_embd, dropout=0.1):
         "Take in model size and number of heads."
         super(MultiHeadedAttention, self).__init__()
-        assert d_model % h == 0
-        # We assume d_v always equals d_k
-        self.d_k = d_model // h
-        self.h = h
-        self.linears = clones(nn.Linear(d_model, d_model), 4)
+
+        # TODO: probably reparametrize in terms of n_head and n_embd // n_head (emb dim per head)
+        assert n_embd % n_head == 0
+        self.n_head = n_head
+        self.n_embd = n_embd
+
+        # projections
+        self.W_q = nn.Linear(self.n_embd, self.n_embd)
+        self.W_k_0 = nn.Linear(self.n_embd, self.n_embd)
+        self.W_k_1 = nn.Linear(self.n_embd, self.n_embd)
+        self.W_v_0 = nn.Linear(self.n_embd, self.n_embd)
+        self.W_v_1 = nn.Linear(self.n_embd, self.n_embd)
+        self.W_o = nn.Linear(self.n_embd, self.n_embd)
+
         self.attn = None
         self.dropout = nn.Dropout(p=dropout)
         
-    def forward(self, query, key, value, mask=None):
+    def forward(self, x, mask=None):
+        
         if mask is not None:
             # Same mask applied to all h heads.
             mask = mask.unsqueeze(1)
-        nbatches = query.size(0)
         
-        # 1) Do all the linear projections in batch from d_model => h x d_k 
-        query, key_0, key_1, value_0, value_1 = [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2) for l, x in zip(self.linears, (query, key, key, value, value))]
+        B, T, C = x.size()
+        assert C == self.n_embd
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q = self.W_q(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k_0 = self.W_k_0(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k_1 = self.W_k_1(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v_0 = self.W_v_0(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v_1 = self.W_v_1(x).view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         
-        # 2) Apply attention on all the projected vectors in batch. 
-        x, self.attn = attention(query, key_0, key_1, value_0, value_1, mask=mask, dropout=self.dropout)
+        # apply attention on all the projected vectors in batch. 
+        x, self.attn = third_order_attention(q, k_0, k_1, v_0, v_1, mask=mask, dropout=self.dropout)
         
-        # 3) "Concat" using a view and apply a final linear. 
-        x = x.transpose(1, 2).contiguous().view(nbatches, -1, self.h * self.d_k)
-        return self.linears[-1](x)
+        # concat using a view and apply a final linear. 
+        x = x.transpose(1, 2).contiguous().view(B, T, C)
+
+        return self.W_o(x)
