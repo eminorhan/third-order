@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 def third_order_attention(query, key_0, key_1, value_0, value_1, mask=None, dropout=None):
     "Compute 'Scaled Dot Product Attention'"
     d_k = query.size(-1)
@@ -21,10 +20,9 @@ def third_order_attention(query, key_0, key_1, value_0, value_1, mask=None, drop
     value = torch.einsum('bhkd,bhld->bhkld', value_0, value_1)
 
     # (B, nh, T, T, T) x (B, nh, T, T, hs) -> (B, nh, T, hs)   
-    output = torch.einseum('bhklm,bhlmd->bhkd', p_attn, value)
+    output = torch.einsum('bhklm,bhlmd->bhkd', p_attn, value)
 
     return output, p_attn
-
 
 class ThirdOrderSelfAttention(nn.Module):
     def __init__(self, n_head, n_embd, dropout=0.1):

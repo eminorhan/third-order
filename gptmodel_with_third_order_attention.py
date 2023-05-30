@@ -29,7 +29,7 @@ class GPT_alef(GPTConfig):
     """ Roughly ??M params """
     n_layer = 12
     n_head = 12
-    n_embd = 786
+    n_embd = 768
 
 class GPT_bet(GPTConfig):
     """ Roughly ??M params """
@@ -117,7 +117,7 @@ class CausalSelfAttention(nn.Module):
         value = torch.einsum('bhkd,bhld->bhkld', v_0, v_1)
 
         # (B, nh, T, T, T) x (B, nh, T, T, hs) -> (B, nh, T, hs)   
-        y = torch.einseum('bhklm,bhlmd->bhkd', p_attn, value)
+        y = torch.einsum('bhklm,bhlmd->bhkd', p_attn, value)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
