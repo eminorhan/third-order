@@ -413,7 +413,6 @@ class MaskedAutoencoderViT(nn.Module):
         loss = self.forward_loss(imgs, pred, mask)
         return loss, pred, mask
 
-
 def mae_vit_small_patch16_3Dattn_dec512d8b(**kwargs):
     model = MaskedAutoencoderViT(third_order_attn=True, img_size=224, patch_size=16, embed_dim=384, depth=12, num_heads=6, decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16, mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model

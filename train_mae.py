@@ -22,7 +22,8 @@ print(torch.__version__)
 
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
-import webdataset as wds
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader, DistributedSampler
 
 import timm
 assert timm.__version__ == "0.3.2"  # version check
@@ -34,7 +35,6 @@ from typing import Iterable
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-GLOBAL_ITER = 0
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
@@ -47,7 +47,7 @@ def get_args_parser():
     parser.add_argument('--model', default='mae_vit_large_patch16', type=str, metavar='MODEL', help='Name of model to train')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--input_size', default=224, type=int, help='images input size')
-    parser.add_argument('--mask_ratio', default=0.75, type=float, help='Masking ratio (percentage of removed patches).')
+    parser.add_argument('--mask_ratio', default=0.8, type=float, help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--norm_pix_loss', action='store_true', help='Use (per-patch) normalized pixels as targets for computing loss')
     parser.set_defaults(norm_pix_loss=False)
 
@@ -59,10 +59,7 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='/scratch/eo41/data/saycam/SAY_5fps_300s_{000000..000009}.tar', type=str, help='dataset path')
     parser.add_argument('--output_dir', default='./output_dir', help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir', help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda', help='device to use for training/testing')
-    parser.add_argument('--seed', default=3, type=int)
-    parser.add_argument('--saveckp_freq', default=3000, type=int, help='Save checkpoint every x iterations.')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
     parser.add_argument('--num_workers', default=16, type=int)
     parser.add_argument('--pin_mem', action='store_true', help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
@@ -91,20 +88,14 @@ def main(args):
         transforms.ToTensor(), 
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
-
-    # use webdataset for loading data
-    dataset = (wds.WebDataset(args.data_path, resampled=True).shuffle(10000, initial=10000).decode("pil").to_tuple("jpg").map(preprocess).map(transform))
-    data_loader = wds.WebLoader(dataset, shuffle=False, batch_size=args.batch_size_per_gpu, num_workers=args.num_workers)
     
+    dataset = ImageFolder(args.data_path, transform=transform)
+    sampler = DistributedSampler(dataset, num_replicas=misc.get_world_size(), rank=misc.get_rank(), shuffle=True)
+    data_loader = DataLoader(dataset, sampler=sampler, batch_size=args.batch_size_per_gpu, num_workers=args.num_workers, pin_memory=args.pin_mem, drop_last=True)
+
     # define the model
     model = models_mae.__dict__[args.model](norm_pix_loss=args.norm_pix_loss)
     model.to(device)
-
-    # effective batch size
-    eff_batch_size = args.batch_size_per_gpu * args.accum_iter * misc.get_world_size()
-    print("lr: %.2e" % args.lr)
-    print("accumulate grad iterations: %d" % args.accum_iter)
-    print("effective batch size: %d" % eff_batch_size)
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
     model_without_ddp = model.module
@@ -123,22 +114,17 @@ def main(args):
     
     print("Starting MAE training!")
     start_time = time.time()
-    for _ in range(args.start_epoch, args.epochs):
-        train_stats = train_one_epoch(model, data_loader, optimizer, device, loss_scaler, args=args)
+    for epoch in range(args.start_epoch, args.epochs):
+        train_one_epoch(model, data_loader, optimizer, device, loss_scaler, epoch, args=args)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
 
-def preprocess(sample):
-    return sample[0]
-
-
-def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: torch.optim.Optimizer, device: torch.device, loss_scaler, args=None):
+def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: torch.optim.Optimizer, device: torch.device, loss_scaler, epoch, args=None):
     
-    global GLOBAL_ITER
-
+    data_loader.sampler.set_epoch(epoch)
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -146,7 +132,7 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
 
     optimizer.zero_grad()
 
-    for data_iter_step, samples in enumerate(data_loader):
+    for it, (samples, _) in enumerate(data_loader):
 
         samples = samples.to(device, non_blocking=True)
 
@@ -160,8 +146,8 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
             sys.exit(1)
 
         loss = loss / accum_iter
-        loss_scaler(loss, optimizer, parameters=model.parameters(), update_grad=(data_iter_step + 1) % accum_iter == 0)
-        if (data_iter_step + 1) % accum_iter == 0:
+        loss_scaler(loss, optimizer, parameters=model.parameters(), update_grad=(it + 1) % accum_iter == 0)
+        if (it + 1) % accum_iter == 0:
             optimizer.zero_grad()
 
         torch.cuda.synchronize()
@@ -171,36 +157,29 @@ def train_one_epoch(model: torch.nn.Module, data_loader: Iterable, optimizer: to
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
 
-        if GLOBAL_ITER % args.saveckp_freq == 0:
-            # ============ writing logs + saving checkpoint ============
-            save_dict = {
-                'model': model.module.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'it': GLOBAL_ITER,
-                'args': args,
-                'scaler': loss_scaler.state_dict(),
-            }
+    # ============ writing logs + saving checkpoint ============
+    save_dict = {
+        'model': model.module.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'args': args,
+        'epoch': epoch,
+        'scaler': loss_scaler.state_dict(),
+    }
 
-            misc.save_on_master(save_dict, os.path.join(args.output_dir, args.save_prefix + '_checkpoint.pth'))
+    misc.save_on_master(save_dict, os.path.join(args.output_dir, args.save_prefix + '_checkpoint.pth'))
 
-            # gather the stats from all processes
-            metric_logger.synchronize_between_processes()
-            print("Averaged stats:", metric_logger)
-            train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, 'it': GLOBAL_ITER}
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print("Averaged stats:", metric_logger)
+    train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, 'epoch': epoch}
 
-            if misc.is_main_process():
-                with (Path(args.output_dir) / (args.save_prefix + "_log.txt")).open("a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
+    if misc.is_main_process():
+        with (Path(args.output_dir) / (args.save_prefix + "_log.txt")).open("a") as f:
+            f.write(json.dumps(log_stats) + "\n")
 
-            # start a fresh logger to wipe off old stats
-            metric_logger = misc.MetricLogger(delimiter="  ")
-
-        GLOBAL_ITER += 1
-
-    print('Out of epoch loop')
-
-    return train_stats
+    # start a fresh logger to wipe off old stats
+    metric_logger = misc.MetricLogger(delimiter="  ")
 
 
 if __name__ == '__main__':
