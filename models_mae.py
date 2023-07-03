@@ -15,6 +15,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from util.pos_embed import get_2d_sincos_pos_embed
 
 def _ntuple(n):
@@ -105,13 +106,13 @@ def third_order_attention(query, key_0, key_1, value_0, value_1, mask=None, drop
     return output, p_attn
 
 class ThirdOrderAttention(nn.Module):
-    def __init__(self, n_embd, n_head, qkv_bias=False, attn_drop=0., proj_drop=0.):
+    def __init__(self, n_embd, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
         "Take in model size and number of heads."
         super(ThirdOrderAttention, self).__init__()
 
         # TODO: probably reparametrize in terms of n_head and n_embd // n_head (emb dim per head)
-        assert n_embd % n_head == 0, 'emb dim should be divisible by num heads'
-        self.n_head = n_head
+        assert n_embd % num_heads == 0, 'emb dim should be divisible by num heads'
+        self.n_head = num_heads
         self.n_embd = n_embd
 
         # projections
@@ -201,7 +202,7 @@ class DropPath(nn.Module):
         return f'drop_prob={round(self.drop_prob,3):0.3f}'
 
 class Block(nn.Module):
-    def __init__(self, dim, num_heads, third_order_attn=False, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., init_values=None, drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, num_heads, mlp_ratio=4., third_order_attn=False, qkv_bias=False, drop=0., attn_drop=0., init_values=None, drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.norm1 = norm_layer(dim)
 
@@ -239,7 +240,7 @@ class MaskedAutoencoderViT(nn.Module):
         num_patches = self.patch_embed.num_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
-        self.blocks = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, third_order_attn=third_order_attn, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(depth)])
+        self.blocks = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, third_order_attn=third_order_attn, qkv_bias=True, norm_layer=norm_layer) for i in range(depth)])
         self.norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
 
@@ -248,7 +249,7 @@ class MaskedAutoencoderViT(nn.Module):
         self.decoder_embed = nn.Linear(embed_dim, decoder_embed_dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
         self.decoder_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_embed_dim), requires_grad=False)  # fixed sin-cos embedding
-        self.decoder_blocks = nn.ModuleList([Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, third_order_attn=False, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(decoder_depth)])
+        self.decoder_blocks = nn.ModuleList([Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, third_order_attn=False, qkv_bias=True, norm_layer=norm_layer) for i in range(decoder_depth)])
         self.decoder_norm = norm_layer(decoder_embed_dim)
         self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True) # decoder to patch
         # --------------------------------------------------------------------------
