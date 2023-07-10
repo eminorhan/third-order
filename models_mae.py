@@ -153,12 +153,13 @@ class ThirdOrderAttention(nn.Module):
         return x, self.attn
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., learnable_temp=False):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
+        self.temp = nn.Parameter(torch.tensor(0.)) if learnable_temp else torch.tensor(0.)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -170,7 +171,7 @@ class Attention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
 
-        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = (q @ k.transpose(-2, -1)) * self.scale * (10.0 ** torch.tanh(self.temp))
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
@@ -202,7 +203,7 @@ class DropPath(nn.Module):
         return f'drop_prob={round(self.drop_prob,3):0.3f}'
 
 class Block(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4., third_order_attn=False, qkv_bias=False, drop=0., attn_drop=0., init_values=None, drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, num_heads, mlp_ratio=4., third_order_attn=False, qkv_bias=False, drop=0., attn_drop=0., init_values=None, drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, learnable_temp=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
 
@@ -211,7 +212,7 @@ class Block(nn.Module):
             self.attn = ThirdOrderAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
         else:
             # standard attention
-            self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+            self.attn = Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop, learnable_temp=learnable_temp)
         
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
@@ -231,7 +232,7 @@ class Block(nn.Module):
 
 class MaskedAutoencoderViT(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone"""
-    def __init__(self, third_order_attn=False, img_size=224, patch_size=16, in_chans=3, embed_dim=1024, depth=24, num_heads=16, decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False):
+    def __init__(self, third_order_attn=False, img_size=224, patch_size=16, in_chans=3, embed_dim=1024, depth=24, num_heads=16, decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, learnable_temp=False):
         super().__init__()
 
         # --------------------------------------------------------------------------
@@ -240,7 +241,7 @@ class MaskedAutoencoderViT(nn.Module):
         num_patches = self.patch_embed.num_patches
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim), requires_grad=False)  # fixed sin-cos embedding
-        self.blocks = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, third_order_attn=third_order_attn, qkv_bias=True, norm_layer=norm_layer) for i in range(depth)])
+        self.blocks = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, third_order_attn=third_order_attn, qkv_bias=True, norm_layer=norm_layer, learnable_temp=learnable_temp) for i in range(depth)])
         self.norm = norm_layer(embed_dim)
         # --------------------------------------------------------------------------
 
@@ -469,7 +470,7 @@ def mae_vit_small_patch14_dec512d8b(**kwargs):
     return model
 
 def mae_vit_base_patch14_dec512d8b(**kwargs):
-    model = MaskedAutoencoderViT(patch_size=14, embed_dim=768, depth=12, num_heads=12, decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16, mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model = MaskedAutoencoderViT(patch_size=14, embed_dim=768, depth=12, num_heads=12, decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16, mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), learnable_temp=True, **kwargs)
     return model
 
 def mae_vit_large_patch14_dec512d8b(**kwargs):
